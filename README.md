@@ -116,3 +116,47 @@ Agent 必须执行以下闭环：
 - 结果可自动化验收
 - 失败可结构化纠错
 - 全流程可复现、可比较、可追踪
+
+---
+
+## 8. 最小示例：可运行、可评分、可纠错、可复现
+
+### 目录
+
+```text
+.
+├── solver/
+│   └── heat_equation.py        # 1D 热方程显式 Euler 有限差分
+├── tasks/
+│   ├── heat_equation_1d.json   # 示例任务
+│   └── loader.py               # 任务加载与字段校验
+├── evaluator/
+│   └── scoring.py              # 验收 + 评分 + 失败诊断建议
+├── run_agent.py                # 端到端执行（含自动重试）
+├── runs/                       # 运行时动态产物目录（不提交产物）
+└── reports/                    # 自动报告输出目录
+```
+
+### 运行方式
+
+```bash
+python run_agent.py --task tasks/heat_equation_1d.json
+```
+
+执行后会自动完成：
+
+1. 读取任务与随机 seed
+2. 调用求解器并进行稳定性检查
+3. 评估误差/预算/评分并给出 pass/fail
+4. 若失败则按失败类型自动调整 `dt`/`nx` 重试（最多 `max_retries`）
+5. 输出：
+   - `runs/<run_id>/config.json`
+   - `runs/<run_id>/metrics.json`
+   - `runs/<run_id>/artifacts/error_history.csv`
+   - `reports/<run_id>.md`
+
+### 说明
+
+- 核心实现仅依赖 Python 标准库。
+- 当前示例使用解析解 `u(x,t)=exp(-alpha*pi^2*t)sin(pi*x)` 做误差验证。
+- 评分权重与硬门槛遵循本文第 4 节规范。
