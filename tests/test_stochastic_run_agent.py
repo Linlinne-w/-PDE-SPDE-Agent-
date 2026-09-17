@@ -45,7 +45,7 @@ class StochasticRunAgentTests(unittest.TestCase):
         self.assertTrue((self.root / outputs["report"]).is_file())
 
     def test_parameter_retries_keep_the_same_brownian_path(self):
-        self.task.update(error_threshold=0.0, max_retries=1)
+        self.task.update({"error_threshold": 0.0, "max_retries": 1})
         outcome = self._run()
         self.assertFalse(outcome["evaluation"]["pass"])
         self.assertEqual(len(outcome["attempts"]), 2)
