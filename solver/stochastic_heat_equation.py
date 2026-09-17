@@ -22,7 +22,11 @@ class StochasticHeatEquationConfig:
 
 
 class BrownianPath:
-    """Sample a Brownian path at requested times using conditional bridges."""
+    """Sample a Brownian path at requested times using conditional bridges.
+
+    Previously sampled values are retained so retries on different time grids
+    remain coupled to the same Brownian path.
+    """
 
     def __init__(self, t_end: float, seed: int):
         if not isfinite(t_end) or t_end < 0:
@@ -54,20 +58,30 @@ class BrownianPath:
 
 
 def stochastic_analytical_solution(
-    x: float, t: float, alpha: float, sigma: float, brownian_value: float,
-    x_start: float = 0.0, x_end: float = 1.0,
+    x: float,
+    t: float,
+    alpha: float,
+    sigma: float,
+    brownian_value: float,
+    x_start: float = 0.0,
+    x_end: float = 1.0,
 ) -> float:
+    """Evaluate the explicit Itô solution along a prescribed Brownian path."""
     if x == x_start or x == x_end:
         return 0.0
     length = x_end - x_start
     mode = pi * (x - x_start) / length
-    amplitude = exp((-alpha * (pi / length) ** 2 - 0.5 * sigma ** 2) * t + sigma * brownian_value)
+    amplitude = exp(
+        (-alpha * (pi / length) ** 2 - 0.5 * sigma ** 2) * t
+        + sigma * brownian_value
+    )
     return amplitude * sin(mode)
 
 
 def _validate_config(config: StochasticHeatEquationConfig) -> None:
     if not all(isfinite(value) for value in (
-        config.alpha, config.x_start, config.x_end, config.t_end, config.dt, config.sigma,
+        config.alpha, config.x_start, config.x_end,
+        config.t_end, config.dt, config.sigma,
     )):
         raise ValueError("SPDE parameters must be finite")
     if config.alpha <= 0 or config.dt <= 0:
@@ -80,9 +94,11 @@ def _validate_config(config: StochasticHeatEquationConfig) -> None:
 
 def solve_stochastic_heat_equation_1d(
     config: StochasticHeatEquationConfig,
-    *, brownian_path: Optional[BrownianPath] = None,
+    *,
+    brownian_path: Optional[BrownianPath] = None,
     brownian_increments: Optional[Sequence[float]] = None,
 ) -> Dict[str, object]:
+    """Solve one path using centered differences and Euler–Maruyama."""
     _validate_config(config)
     if brownian_path is not None and brownian_increments is not None:
         raise ValueError("Supply either a Brownian path or increments, not both")
@@ -90,7 +106,11 @@ def solve_stochastic_heat_equation_1d(
     steps = max(1, ceil(config.t_end / config.dt)) if config.t_end else 0
     time_grid = [min(index * config.dt, config.t_end) for index in range(steps + 1)]
     time_grid[-1] = config.t_end
-    time_grid = [t for index, t in enumerate(time_grid) if index == 0 or t > time_grid[index - 1]]
+    time_grid = [
+        t for index, t in enumerate(time_grid)
+        if index == 0 or t > time_grid[index - 1]
+    ]
+
     if brownian_increments is None:
         path = brownian_path or BrownianPath(config.t_end, config.seed)
         if path.t_end != config.t_end:
@@ -112,13 +132,17 @@ def solve_stochastic_heat_equation_1d(
         ratio = config.alpha * (right - left) / (dx * dx)
         next_u = u[:]
         for index in range(1, config.nx):
-            next_u[index] = u[index] + ratio * (u[index + 1] - 2.0 * u[index] + u[index - 1]) + config.sigma * u[index] * dw
+            next_u[index] = (
+                u[index]
+                + ratio * (u[index + 1] - 2.0 * u[index] + u[index - 1])
+                + config.sigma * u[index] * dw
+            )
         next_u[0] = next_u[-1] = 0.0
         u = next_u
 
     reference = [stochastic_analytical_solution(
-        x, config.t_end, config.alpha, config.sigma, brownian_terminal,
-        config.x_start, config.x_end,
+        x, config.t_end, config.alpha, config.sigma,
+        brownian_terminal, config.x_start, config.x_end,
     ) for x in x_grid]
     finite_solution = all(isfinite(value) for value in u)
     max_dt = stability_limit(config.alpha, dx)
