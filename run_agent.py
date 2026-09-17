@@ -111,7 +111,12 @@ def _auto_correct_params(task: Dict[str, object], failure_types: List[str]) -> N
     task["dt"] = min(task["dt"], max_dt)
 
 
-def _write_outputs(run_id: str, task: Dict[str, object], metrics: Dict[str, object], attempts: List[Dict[str, object]]) -> None:
+def _write_outputs(
+    run_id: str,
+    task: Dict[str, object],
+    metrics: Dict[str, object],
+    attempts: List[Dict[str, object]],
+) -> None:
     run_dir = ROOT / "runs" / run_id
     artifacts_dir = run_dir / "artifacts"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -159,7 +164,21 @@ def _write_outputs(run_id: str, task: Dict[str, object], metrics: Dict[str, obje
             f"- Attempt {row['attempt']}: dt={row['dt']}, nx={row['nx']}, l2={row['l2_error']:.6e}, pass={row['pass']}"
         )
 
-    (ROOT / "reports" / f"{run_id}.md").write_text("\n".join(report_lines) + "\n", encoding="utf-8")
+    (ROOT / "reports" / f"{run_id}.md").write_text(
+        "\n".join(report_lines) + "\n", encoding="utf-8"
+    )
+
+
+def _build_output_paths(run_id: str) -> Dict[str, str]:
+    run_dir = Path("runs") / run_id
+    artifacts_dir = run_dir / "artifacts"
+    return {
+        "run_dir": run_dir.as_posix(),
+        "config": (run_dir / "config.json").as_posix(),
+        "metrics": (run_dir / "metrics.json").as_posix(),
+        "artifacts_dir": artifacts_dir.as_posix(),
+        "report": (Path("reports") / f"{run_id}.md").as_posix(),
+    }
 
 
 def run(task_path: Path) -> Dict[str, object]:
@@ -203,10 +222,24 @@ def run(task_path: Path) -> Dict[str, object]:
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     _write_outputs(run_id, task, evaluation, attempts)
-    _plot_solution(
-        solved, ROOT / "runs" / run_id / "artifacts" / "solution_comparison.png"
-    )
-    return {"run_id": run_id, "evaluation": evaluation, "attempts": attempts}
+
+    warning = None
+    try:
+        _plot_solution(
+            solved, ROOT / "runs" / run_id / "artifacts" / "solution_comparison.png"
+        )
+    except Exception as exc:  # pragma: no cover - best-effort artifact generation
+        warning = f"failed_to_plot_solution: {type(exc).__name__}: {exc}"
+
+    outcome = {
+        "run_id": run_id,
+        "evaluation": evaluation,
+        "attempts": attempts,
+        "outputs": _build_output_paths(run_id),
+    }
+    if warning:
+        outcome["warnings"] = [warning]
+    return outcome
 
 
 def main() -> None:
