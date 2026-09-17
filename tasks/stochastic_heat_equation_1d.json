@@ -1,0 +1,15 @@
+{
+  "equation": "stochastic_heat_1d",
+  "alpha": 1.0,
+  "sigma": 0.5,
+  "domain": {"x_start": 0.0, "x_end": 1.0},
+  "initial_condition": "sin(pi*(x-x_start)/(x_end-x_start))",
+  "boundary_condition": "zero_dirichlet",
+  "t_end": 0.05,
+  "dt": 0.0002,
+  "nx": 40,
+  "error_threshold": 0.01,
+  "budget": {"max_runtime_seconds": 2.0, "max_memory_mb": 32.0},
+  "seed": 12345,
+  "max_retries": 3
+}

@@ -9,20 +9,28 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
-from typing import Dict, List
+from typing import Dict, List, Optional, Sequence, Union
 
 from evaluator import evaluate_result
-from solver import HeatEquationConfig, solve_heat_equation_1d
+from solver import (
+    BrownianPath,
+    HeatEquationConfig,
+    StochasticHeatEquationConfig,
+    solve_heat_equation_1d,
+    solve_stochastic_heat_equation_1d,
+)
 from tasks import load_task
 
 
 ROOT = Path(__file__).resolve().parent
+SolverConfig = Union[HeatEquationConfig, StochasticHeatEquationConfig]
+
+
 def _plot_solution(solved: Dict[str, object], output_path: Path) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    # 获取本次求解的网格、数值解和解析解
     x = solved["grid"]["x"]
     u_num = solved["solution"]["numerical_final"]
     u_ref = solved["solution"]["reference_final"]
@@ -33,8 +41,8 @@ def _plot_solution(solved: Dict[str, object], output_path: Path) -> None:
         2, 1, figsize=(8, 6), sharex=True, layout="constrained"
     )
     try:
-        # 上图：数值解与解析解对比
-        ax1.plot(x, u_ref, "k-", label="Analytical solution")
+        reference_label = "Analytical solution (same Brownian path)" if "noise" in solved else "Analytical solution"
+        ax1.plot(x, u_ref, "k-", label=reference_label)
         ax1.plot(
             x, u_num, "ro", markersize=4, fillstyle="none",
             label="Numerical solution"
@@ -47,7 +55,6 @@ def _plot_solution(solved: Dict[str, object], output_path: Path) -> None:
         ax1.legend()
         ax1.grid(alpha=0.3)
 
-        # 下图：各空间位置的绝对误差
         ax2.plot(x, error, color="tab:blue")
         ax2.set_xlabel("x")
         ax2.set_ylabel("Absolute error")
@@ -59,10 +66,27 @@ def _plot_solution(solved: Dict[str, object], output_path: Path) -> None:
     finally:
         plt.close(fig)
 
-def _measure_solve(config: HeatEquationConfig) -> Dict[str, object]:
+
+def _solve_config(
+    config: SolverConfig,
+    *,
+    brownian_path: Optional[BrownianPath] = None,
+    brownian_increments: Optional[Sequence[float]] = None,
+) -> Dict[str, object]:
+    if isinstance(config, StochasticHeatEquationConfig):
+        return solve_stochastic_heat_equation_1d(
+            config, brownian_path=brownian_path,
+            brownian_increments=brownian_increments,
+        )
+    return solve_heat_equation_1d(config)
+
+
+def _measure_solve(
+    config: SolverConfig, *, brownian_path: Optional[BrownianPath] = None,
+) -> Dict[str, object]:
     tracemalloc.start()
     start = perf_counter()
-    solve_out = solve_heat_equation_1d(config)
+    solve_out = _solve_config(config, brownian_path=brownian_path)
     runtime = perf_counter() - start
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
@@ -91,8 +115,13 @@ def _build_convergence_data(config: HeatEquationConfig) -> List[Dict[str, float]
     ]
 
 
-def _check_reproducible(config: HeatEquationConfig, baseline_error: float) -> bool:
-    rerun = solve_heat_equation_1d(config)
+def _check_reproducible(
+    config: SolverConfig,
+    baseline_error: float,
+    *,
+    brownian_increments: Optional[Sequence[float]] = None,
+) -> bool:
+    rerun = _solve_config(config, brownian_increments=brownian_increments)
     return abs(rerun["errors"]["l2"] - baseline_error) < 1e-14
 
 
@@ -116,11 +145,13 @@ def _write_outputs(
     task: Dict[str, object],
     metrics: Dict[str, object],
     attempts: List[Dict[str, object]],
+    solved: Optional[Dict[str, object]] = None,
 ) -> None:
     run_dir = ROOT / "runs" / run_id
     artifacts_dir = run_dir / "artifacts"
     run_dir.mkdir(parents=True, exist_ok=True)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
+    (ROOT / "reports").mkdir(parents=True, exist_ok=True)
 
     (run_dir / "config.json").write_text(json.dumps(task, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -137,25 +168,50 @@ def _write_outputs(
         writer = csv.DictWriter(f, fieldnames=["attempt", "dt", "nx", "l2_error", "pass"])
         writer.writeheader()
         for row in attempts:
-            writer.writerow(
-                {
-                    "attempt": row["attempt"],
-                    "dt": row["dt"],
-                    "nx": row["nx"],
-                    "l2_error": row["l2_error"],
-                    "pass": row["pass"],
-                }
-            )
+            writer.writerow({
+                "attempt": row["attempt"], "dt": row["dt"], "nx": row["nx"],
+                "l2_error": row["l2_error"], "pass": row["pass"],
+            })
+
+    if solved is not None:
+        with (artifacts_dir / "solution_final.csv").open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["x", "numerical", "reference", "absolute_error"])
+            for x, numerical, reference in zip(
+                solved["grid"]["x"], solved["solution"]["numerical_final"],
+                solved["solution"]["reference_final"],
+            ):
+                writer.writerow([x, numerical, reference, abs(numerical - reference)])
+        if "noise" in solved:
+            noise = solved["noise"]
+            with (artifacts_dir / "brownian_path.csv").open("w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["t", "brownian_value", "increment"])
+                writer.writerow([0.0, 0.0, 0.0])
+                brownian_value = 0.0
+                for t, dw in zip(noise["time_grid"][1:], noise["brownian_increments"]):
+                    brownian_value += dw
+                    if t == noise["time_grid"][-1]:
+                        brownian_value = noise["brownian_terminal"]
+                    writer.writerow([t, brownian_value, dw])
 
     report_lines = [
         f"# Run Report: {run_id}",
         "",
+        f"- Equation: {task['equation']}",
         f"- Pass: **{metrics['pass']}**",
         f"- Total Score: **{metrics['score_breakdown']['total_100']} / 100**",
         f"- Failure Types: {', '.join(metrics['failure_types']) if metrics['failure_types'] else 'none'}",
         "",
         "## Next-round Suggestions",
     ]
+    if task["equation"] == "stochastic_heat_1d":
+        report_lines[2:2] = [
+            "- Error: single-path spatial L2 error against the explicit Itô solution.",
+            "- Numerical and reference solutions use the same Brownian path; retries are coupled.",
+            "- No Monte Carlo strong-convergence order is estimated in this run.",
+            "- Stability gate checks diffusion CFL and finite output, not a stochastic mean-square stability theorem.",
+        ]
     for suggestion in metrics["next_round_suggestions"]:
         report_lines.append(f"- {suggestion}")
     report_lines.extend(["", "## Attempts", ""])
@@ -164,32 +220,36 @@ def _write_outputs(
             f"- Attempt {row['attempt']}: dt={row['dt']}, nx={row['nx']}, l2={row['l2_error']:.6e}, pass={row['pass']}"
         )
 
-    (ROOT / "reports" / f"{run_id}.md").write_text(
-        "\n".join(report_lines) + "\n", encoding="utf-8"
-    )
+    (ROOT / "reports" / f"{run_id}.md").write_text("\n".join(report_lines) + "\n", encoding="utf-8")
 
 
-def _build_output_paths(run_id: str) -> Dict[str, str]:
+def _build_output_paths(run_id: str, *, stochastic: bool = False) -> Dict[str, str]:
     run_dir = Path("runs") / run_id
     artifacts_dir = run_dir / "artifacts"
-    return {
+    outputs = {
         "run_dir": run_dir.as_posix(),
         "config": (run_dir / "config.json").as_posix(),
         "metrics": (run_dir / "metrics.json").as_posix(),
         "artifacts_dir": artifacts_dir.as_posix(),
         "report": (Path("reports") / f"{run_id}.md").as_posix(),
+        "solution": (artifacts_dir / "solution_final.csv").as_posix(),
     }
+    if stochastic:
+        outputs["brownian_path"] = (artifacts_dir / "brownian_path.csv").as_posix()
+    return outputs
 
 
 def run(task_path: Path) -> Dict[str, object]:
     task = load_task(task_path)
     random.seed(task["seed"])
+    stochastic = task["equation"] == "stochastic_heat_1d"
+    brownian_path = BrownianPath(float(task["t_end"]), int(task["seed"])) if stochastic else None
 
     attempts: List[Dict[str, object]] = []
     evaluation = None
 
     for attempt in range(1, int(task["max_retries"]) + 2):
-        config = HeatEquationConfig(
+        config_fields = dict(
             alpha=float(task["alpha"]),
             x_start=float(task["domain"]["x_start"]),
             x_end=float(task["domain"]["x_end"]),
@@ -197,37 +257,50 @@ def run(task_path: Path) -> Dict[str, object]:
             t_end=float(task["t_end"]),
             dt=float(task["dt"]),
         )
-
-        solved = _measure_solve(config)
-        solved["reproducible"] = _check_reproducible(config, solved["errors"]["l2"])
-        solved["robustness_pass_rate"] = 1.0 if solved["errors"]["l2"] <= float(task["error_threshold"]) else 0.0
-        solved["convergence"] = _build_convergence_data(config)
-        evaluation = evaluate_result(task, solved)
-
-        attempts.append(
-            {
-                "attempt": attempt,
-                "dt": task["dt"],
-                "nx": task["nx"],
-                "l2_error": solved["errors"]["l2"],
-                "pass": evaluation["pass"],
-            }
+        config = (
+            StochasticHeatEquationConfig(
+                **config_fields, sigma=float(task["sigma"]), seed=int(task["seed"]),
+            ) if stochastic else HeatEquationConfig(**config_fields)
         )
+
+        solved = _measure_solve(config, brownian_path=brownian_path)
+        noise = solved.get("noise", {})
+        solved["reproducible"] = _check_reproducible(
+            config, solved["errors"]["l2"],
+            brownian_increments=noise.get("brownian_increments"),
+        )
+        solved["robustness_pass_rate"] = 1.0 if solved["errors"]["l2"] <= float(task["error_threshold"]) else 0.0
+        solved["convergence"] = [] if stochastic else _build_convergence_data(config)
+        evaluation = evaluate_result(task, solved)
+        if stochastic:
+            evaluation["metrics"].update({
+                "error_type": "single_path_l2",
+                "sigma": config.sigma,
+                "seed": config.seed,
+                "brownian_terminal": noise["brownian_terminal"],
+            })
+
+        attempts.append({
+            "attempt": attempt,
+            "dt": task["dt"],
+            "nx": task["nx"],
+            "l2_error": solved["errors"]["l2"],
+            "pass": evaluation["pass"],
+        })
+        if stochastic:
+            attempts[-1]["brownian_terminal"] = noise["brownian_terminal"]
 
         if evaluation["pass"]:
             break
-
         if attempt <= int(task["max_retries"]):
             _auto_correct_params(task, evaluation["failure_types"])
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
-    _write_outputs(run_id, task, evaluation, attempts)
+    _write_outputs(run_id, task, evaluation, attempts, solved)
 
     warning = None
     try:
-        _plot_solution(
-            solved, ROOT / "runs" / run_id / "artifacts" / "solution_comparison.png"
-        )
+        _plot_solution(solved, ROOT / "runs" / run_id / "artifacts" / "solution_comparison.png")
     except Exception as exc:  # pragma: no cover - best-effort artifact generation
         warning = f"failed_to_plot_solution: {type(exc).__name__}: {exc}"
 
@@ -235,7 +308,7 @@ def run(task_path: Path) -> Dict[str, object]:
         "run_id": run_id,
         "evaluation": evaluation,
         "attempts": attempts,
-        "outputs": _build_output_paths(run_id),
+        "outputs": _build_output_paths(run_id, stochastic=stochastic),
     }
     if warning:
         outcome["warnings"] = [warning]
