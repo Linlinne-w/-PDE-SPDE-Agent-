@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+
+runs/*/
+!runs/.gitkeep
+!runs/README.md
+
+reports/*.md
+!README.md
