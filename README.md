@@ -33,7 +33,7 @@ Agent 必须执行以下闭环：
 └── README.md
 ```
 
-每次运行至少产出：
+每次运行（无论评估成功或失败）至少产出：
 
 - `runs/<run_id>/config.json`：完整参数与随机种子
 - `runs/<run_id>/metrics.json`：误差、耗时、内存、是否达标
@@ -149,7 +149,7 @@ python run_agent.py --task tasks/heat_equation_1d.json
 2. 调用求解器并进行稳定性检查
 3. 评估误差/预算/评分并给出 pass/fail
 4. 若失败则按失败类型自动调整 `dt`/`nx` 重试（最多 `max_retries`）
-5. 输出：
+5. 输出（成功/失败都会生成）：
    - `runs/<run_id>/config.json`
    - `runs/<run_id>/metrics.json`
    - `runs/<run_id>/artifacts/error_history.csv`
