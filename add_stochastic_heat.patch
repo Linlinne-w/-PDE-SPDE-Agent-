@@ -1,0 +1,787 @@
+diff --git a/README.md b/README.md
+index e6058f4..31043c8 100644
+--- a/README.md
++++ b/README.md
+@@ -21,7 +21,7 @@ Agent 必须执行以下闭环：
+ 
+ ## 2. 最小可运行环境规范
+ 
+-当前仓库是最小骨架（仅 README）。建议按以下结构补齐：
++当前仓库已实现一维确定性热方程和具有显式解的随机热方程。工作目录结构如下：
+ 
+ ```text
+ .
+@@ -157,12 +157,74 @@ python run_agent.py --task tasks/heat_equation_1d.json
+ 
+ ### 说明
+ 
+-- 核心实现仅依赖 Python 标准库。
++- 核心求解实现仅依赖 Python 标准库；对比图需要安装 `matplotlib`，缺少绘图库时仍会保存数据和报告。
+ - 当前示例使用解析解 `u(x,t)=exp(-alpha*pi^2*t)sin(pi*x)` 做误差验证。
+ - 评分权重与硬门槛遵循本文第 4 节规范。
+ 
+ 
+ 
++## 9. 新增 SPDE：具有显式解的随机热方程
++
++当前支持的随机问题为 **Itô 型、标量时间乘性噪声**：
++
++$$
++du(t,x)=\alpha u_{xx}(t,x)\,dt+\sigma u(t,x)\,dB_t,
++\qquad x\in(a,b).
++$$
++
++边界为 $u(t,a)=u(t,b)=0$，初值为
++$u(0,x)=\sin(\pi(x-a)/(b-a))$。其中 $B_t$ 为一维标准布朗运动，
++所有空间点共享这一时间噪声；该算例不使用空间白噪声或一般的 Q-Wiener 噪声。
++
++令 $L=b-a$，显式解为
++
++$$
++u(t,x)=\exp\left[\left(-\alpha\frac{\pi^2}{L^2}
++-\frac{\sigma^2}{2}\right)t+\sigma B_t\right]
++\sin\left(\frac{\pi(x-a)}{L}\right).
++$$
++
++正弦函数是 Laplace 算子的特征函数，其振幅满足几何布朗运动方程；
++$-\sigma^2/2$ 是 Itô 修正项。`sigma=0` 时退化为原有确定性热方程。
++
++数值方法为**空间二阶中心差分 + 时间 Euler–Maruyama**：
++
++$$
++U_i^{n+1}=U_i^n+\frac{\alpha h_n}{\Delta x^2}
++(U_{i+1}^n-2U_i^n+U_{i-1}^n)+\sigma U_i^n\Delta B_n.
++$$
++
++最后一步使用实际剩余时间 $h_n$。数值解和显式解使用同一路径：
++显式解中的 $B_T$ 与数值计算的布朗增量对应。参数重试复用 `BrownianPath`，
++通过条件布朗桥补充新时间点，保留已采样值；仅对不同时间网格设置相同 seed 并不足以耦合路径。
++
++### 运行
++
++```bash
++python -m pip install matplotlib  # 可选，用于绘图
++python run_agent.py --task tasks/stochastic_heat_equation_1d.json
++python -m unittest discover -s tests -v
++```
++
++任务通过 `equation="stochastic_heat_1d"` 选择新求解器，`sigma` 指定噪声幅度，
++`seed` 指定路径随机种子。当前两个求解器均使用上述正弦初值和零边界；
++`initial_condition`、`boundary_condition` 是描述字段，不解析任意表达式。
++未知 `equation` 和缺少 `sigma` 的随机任务会明确报错。
++
++除原有配置、指标、尝试记录和文字报告外，输出包括：
++
++- `runs/<run_id>/artifacts/solution_final.csv`：最终时刻的网格、数值解、显式解及绝对误差。
++- `runs/<run_id>/artifacts/brownian_path.csv`：最终一次求解的时间点、布朗值和实际增量。
++- `runs/<run_id>/artifacts/solution_comparison.png`：同一路径上的数值解与显式解对比图（安装绘图库后生成）。
++
++`solve_stochastic_heat_equation_1d(config, brownian_increments=...)` 可以重放保存的增量。
++重试会补充路径采样点，因此重放最终一次求解应使用保存的增量；仅最终配置和 seed
++不足以重建此前所有路径采样操作。误差和资源指标延续现有评价接口：
++`l2_error` 为**单条轨道的空间 L2 误差**，不是多轨道强误差的蒙特卡洛估计。
++随机任务的 `estimated_convergence_order` 为 `null`；本次运行不声称验证了时间或空间强收敛阶。
++稳定性门槛检查确定性扩散的 CFL 条件与输出有限性，不等价于随机格式的均方稳定性证明。
++资源计量仍是单次求解耗时和 `tracemalloc` 跟踪的 Python 内存峰值。
++
+ ### 当前仓库是为了应聘腾讯北京的实习岗位: 混元基座-STEM Agent研究
+ 课题描述
+ 课题背景：
+diff --git a/run_agent.py b/run_agent.py
+index 0080f3c..73d35af 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -9,14 +9,23 @@ import uuid
+ from datetime import datetime, timezone
+ from pathlib import Path
+ from time import perf_counter
+-from typing import Dict, List
++from typing import Dict, List, Optional, Sequence, Union
+ 
+ from evaluator import evaluate_result
+-from solver import HeatEquationConfig, solve_heat_equation_1d
++from solver import (
++    BrownianPath,
++    HeatEquationConfig,
++    StochasticHeatEquationConfig,
++    solve_heat_equation_1d,
++    solve_stochastic_heat_equation_1d,
++)
+ from tasks import load_task
+ 
+ 
+ ROOT = Path(__file__).resolve().parent
++SolverConfig = Union[HeatEquationConfig, StochasticHeatEquationConfig]
++
++
+ def _plot_solution(solved: Dict[str, object], output_path: Path) -> None:
+     import matplotlib
+     matplotlib.use("Agg")
+@@ -34,7 +43,8 @@ def _plot_solution(solved: Dict[str, object], output_path: Path) -> None:
+     )
+     try:
+         # 上图：数值解与解析解对比
+-        ax1.plot(x, u_ref, "k-", label="Analytical solution")
++        reference_label = "Analytical solution (same Brownian path)" if "noise" in solved else "Analytical solution"
++        ax1.plot(x, u_ref, "k-", label=reference_label)
+         ax1.plot(
+             x, u_num, "ro", markersize=4, fillstyle="none",
+             label="Numerical solution"
+@@ -59,10 +69,26 @@ def _plot_solution(solved: Dict[str, object], output_path: Path) -> None:
+     finally:
+         plt.close(fig)
+ 
+-def _measure_solve(config: HeatEquationConfig) -> Dict[str, object]:
++def _solve_config(
++    config: SolverConfig,
++    *,
++    brownian_path: Optional[BrownianPath] = None,
++    brownian_increments: Optional[Sequence[float]] = None,
++) -> Dict[str, object]:
++    if isinstance(config, StochasticHeatEquationConfig):
++        return solve_stochastic_heat_equation_1d(
++            config, brownian_path=brownian_path,
++            brownian_increments=brownian_increments,
++        )
++    return solve_heat_equation_1d(config)
++
++
++def _measure_solve(
++    config: SolverConfig, *, brownian_path: Optional[BrownianPath] = None,
++) -> Dict[str, object]:
+     tracemalloc.start()
+     start = perf_counter()
+-    solve_out = solve_heat_equation_1d(config)
++    solve_out = _solve_config(config, brownian_path=brownian_path)
+     runtime = perf_counter() - start
+     _, peak = tracemalloc.get_traced_memory()
+     tracemalloc.stop()
+@@ -91,8 +117,13 @@ def _build_convergence_data(config: HeatEquationConfig) -> List[Dict[str, float]
+     ]
+ 
+ 
+-def _check_reproducible(config: HeatEquationConfig, baseline_error: float) -> bool:
+-    rerun = solve_heat_equation_1d(config)
++def _check_reproducible(
++    config: SolverConfig,
++    baseline_error: float,
++    *,
++    brownian_increments: Optional[Sequence[float]] = None,
++) -> bool:
++    rerun = _solve_config(config, brownian_increments=brownian_increments)
+     return abs(rerun["errors"]["l2"] - baseline_error) < 1e-14
+ 
+ 
+@@ -116,11 +147,13 @@ def _write_outputs(
+     task: Dict[str, object],
+     metrics: Dict[str, object],
+     attempts: List[Dict[str, object]],
++    solved: Optional[Dict[str, object]] = None,
+ ) -> None:
+     run_dir = ROOT / "runs" / run_id
+     artifacts_dir = run_dir / "artifacts"
+     run_dir.mkdir(parents=True, exist_ok=True)
+     artifacts_dir.mkdir(parents=True, exist_ok=True)
++    (ROOT / "reports").mkdir(parents=True, exist_ok=True)
+ 
+     (run_dir / "config.json").write_text(json.dumps(task, indent=2, ensure_ascii=False), encoding="utf-8")
+ 
+@@ -147,15 +180,45 @@ def _write_outputs(
+                 }
+             )
+ 
++    if solved is not None:
++        with (artifacts_dir / "solution_final.csv").open("w", newline="", encoding="utf-8") as f:
++            writer = csv.writer(f)
++            writer.writerow(["x", "numerical", "reference", "absolute_error"])
++            for x, numerical, reference in zip(
++                solved["grid"]["x"], solved["solution"]["numerical_final"],
++                solved["solution"]["reference_final"],
++            ):
++                writer.writerow([x, numerical, reference, abs(numerical - reference)])
++        if "noise" in solved:
++            noise = solved["noise"]
++            with (artifacts_dir / "brownian_path.csv").open("w", newline="", encoding="utf-8") as f:
++                writer = csv.writer(f)
++                writer.writerow(["t", "brownian_value", "increment"])
++                writer.writerow([0.0, 0.0, 0.0])
++                brownian_value = 0.0
++                for t, dw in zip(noise["time_grid"][1:], noise["brownian_increments"]):
++                    brownian_value += dw
++                    if t == noise["time_grid"][-1]:
++                        brownian_value = noise["brownian_terminal"]
++                    writer.writerow([t, brownian_value, dw])
++
+     report_lines = [
+         f"# Run Report: {run_id}",
+         "",
++        f"- Equation: {task['equation']}",
+         f"- Pass: **{metrics['pass']}**",
+         f"- Total Score: **{metrics['score_breakdown']['total_100']} / 100**",
+         f"- Failure Types: {', '.join(metrics['failure_types']) if metrics['failure_types'] else 'none'}",
+         "",
+         "## Next-round Suggestions",
+     ]
++    if task["equation"] == "stochastic_heat_1d":
++        report_lines[2:2] = [
++            "- Error: single-path spatial L2 error against the explicit Itô solution.",
++            "- Numerical and reference solutions use the same Brownian path; retries are coupled.",
++            "- No Monte Carlo strong-convergence order is estimated in this run.",
++            "- Stability gate checks diffusion CFL and finite output, not a stochastic mean-square stability theorem.",
++        ]
+     for suggestion in metrics["next_round_suggestions"]:
+         report_lines.append(f"- {suggestion}")
+     report_lines.extend(["", "## Attempts", ""])
+@@ -169,27 +232,33 @@ def _write_outputs(
+     )
+ 
+ 
+-def _build_output_paths(run_id: str) -> Dict[str, str]:
++def _build_output_paths(run_id: str, *, stochastic: bool = False) -> Dict[str, str]:
+     run_dir = Path("runs") / run_id
+     artifacts_dir = run_dir / "artifacts"
+-    return {
++    outputs = {
+         "run_dir": run_dir.as_posix(),
+         "config": (run_dir / "config.json").as_posix(),
+         "metrics": (run_dir / "metrics.json").as_posix(),
+         "artifacts_dir": artifacts_dir.as_posix(),
+         "report": (Path("reports") / f"{run_id}.md").as_posix(),
++        "solution": (artifacts_dir / "solution_final.csv").as_posix(),
+     }
++    if stochastic:
++        outputs["brownian_path"] = (artifacts_dir / "brownian_path.csv").as_posix()
++    return outputs
+ 
+ 
+ def run(task_path: Path) -> Dict[str, object]:
+     task = load_task(task_path)
+     random.seed(task["seed"])
++    stochastic = task["equation"] == "stochastic_heat_1d"
++    brownian_path = BrownianPath(float(task["t_end"]), int(task["seed"])) if stochastic else None
+ 
+     attempts: List[Dict[str, object]] = []
+     evaluation = None
+ 
+     for attempt in range(1, int(task["max_retries"]) + 2):
+-        config = HeatEquationConfig(
++        config_fields = dict(
+             alpha=float(task["alpha"]),
+             x_start=float(task["domain"]["x_start"]),
+             x_end=float(task["domain"]["x_end"]),
+@@ -197,12 +266,28 @@ def run(task_path: Path) -> Dict[str, object]:
+             t_end=float(task["t_end"]),
+             dt=float(task["dt"]),
+         )
++        config = (
++            StochasticHeatEquationConfig(
++                **config_fields, sigma=float(task["sigma"]), seed=int(task["seed"]),
++            ) if stochastic else HeatEquationConfig(**config_fields)
++        )
+ 
+-        solved = _measure_solve(config)
+-        solved["reproducible"] = _check_reproducible(config, solved["errors"]["l2"])
++        solved = _measure_solve(config, brownian_path=brownian_path)
++        noise = solved.get("noise", {})
++        solved["reproducible"] = _check_reproducible(
++            config, solved["errors"]["l2"],
++            brownian_increments=noise.get("brownian_increments"),
++        )
+         solved["robustness_pass_rate"] = 1.0 if solved["errors"]["l2"] <= float(task["error_threshold"]) else 0.0
+-        solved["convergence"] = _build_convergence_data(config)
++        solved["convergence"] = [] if stochastic else _build_convergence_data(config)
+         evaluation = evaluate_result(task, solved)
++        if stochastic:
++            evaluation["metrics"].update({
++                "error_type": "single_path_l2",
++                "sigma": config.sigma,
++                "seed": config.seed,
++                "brownian_terminal": noise["brownian_terminal"],
++            })
+ 
+         attempts.append(
+             {
+@@ -213,6 +298,8 @@ def run(task_path: Path) -> Dict[str, object]:
+                 "pass": evaluation["pass"],
+             }
+         )
++        if stochastic:
++            attempts[-1]["brownian_terminal"] = noise["brownian_terminal"]
+ 
+         if evaluation["pass"]:
+             break
+@@ -221,7 +308,7 @@ def run(task_path: Path) -> Dict[str, object]:
+             _auto_correct_params(task, evaluation["failure_types"])
+ 
+     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
+-    _write_outputs(run_id, task, evaluation, attempts)
++    _write_outputs(run_id, task, evaluation, attempts, solved)
+ 
+     warning = None
+     try:
+@@ -235,7 +322,7 @@ def run(task_path: Path) -> Dict[str, object]:
+         "run_id": run_id,
+         "evaluation": evaluation,
+         "attempts": attempts,
+-        "outputs": _build_output_paths(run_id),
++        "outputs": _build_output_paths(run_id, stochastic=stochastic),
+     }
+     if warning:
+         outcome["warnings"] = [warning]
+diff --git a/solver/__init__.py b/solver/__init__.py
+index 9d478c3..3bfa01e 100644
+--- a/solver/__init__.py
++++ b/solver/__init__.py
+@@ -5,6 +5,12 @@ from .heat_equation import (
+     solve_heat_equation_1d,
+     stability_limit,
+ )
++from .stochastic_heat_equation import (
++    BrownianPath,
++    StochasticHeatEquationConfig,
++    solve_stochastic_heat_equation_1d,
++    stochastic_analytical_solution,
++)
+ 
+ __all__ = [
+     "HeatEquationConfig",
+@@ -12,4 +18,8 @@ __all__ = [
+     "compute_l2_error",
+     "solve_heat_equation_1d",
+     "stability_limit",
++    "BrownianPath",
++    "StochasticHeatEquationConfig",
++    "solve_stochastic_heat_equation_1d",
++    "stochastic_analytical_solution",
+ ]
+diff --git a/solver/stochastic_heat_equation.py b/solver/stochastic_heat_equation.py
+new file mode 100644
+index 0000000..dbdac43
+--- /dev/null
++++ b/solver/stochastic_heat_equation.py
+@@ -0,0 +1,179 @@
++"""An Itô stochastic heat equation with scalar temporal multiplicative noise.
++
++du = alpha * u_xx dt + sigma * u dB_t, with zero Dirichlet boundaries
++and initial data sin(pi * (x - x_start) / (x_end - x_start)).
++The finite difference / Euler--Maruyama solution is compared with the
++explicit solution along the same Brownian path.
++"""
++
++from __future__ import annotations
++
++from bisect import bisect_left
++from dataclasses import asdict, dataclass
++from math import ceil, exp, fsum, isfinite, pi, sin, sqrt
++from random import Random
++from typing import Dict, List, Optional, Sequence
++
++from .heat_equation import compute_l2_error, stability_limit
++
++
++@dataclass
++class StochasticHeatEquationConfig:
++    alpha: float
++    x_start: float
++    x_end: float
++    nx: int
++    t_end: float
++    dt: float
++    sigma: float = 0.5
++    seed: int = 12345
++
++
++class BrownianPath:
++    """Sample a Brownian path at requested times using conditional bridges.
++
++    Previously sampled values are retained. Reusing this object couples
++    different time grids, including grids chosen during parameter retries.
++    A seed alone does not couple independently generated coarse/fine grids.
++    """
++
++    def __init__(self, t_end: float, seed: int):
++        if not isfinite(t_end) or t_end < 0:
++            raise ValueError("t_end must be finite and nonnegative")
++        self.t_end = t_end
++        self._rng = Random(seed)
++        self._times = [0.0] if t_end == 0 else [0.0, t_end]
++        self._values = {0.0: 0.0}
++        if t_end > 0:
++            self._values[t_end] = self._rng.gauss(0.0, sqrt(t_end))
++
++    def value(self, t: float) -> float:
++        if not isfinite(t) or not 0.0 <= t <= self.t_end:
++            raise ValueError("Brownian evaluation time must lie in [0, t_end]")
++        if t in self._values:
++            return self._values[t]
++        index = bisect_left(self._times, t)
++        left, right = self._times[index - 1], self._times[index]
++        weight = (t - left) / (right - left)
++        mean = (1.0 - weight) * self._values[left] + weight * self._values[right]
++        variance = (t - left) * (right - t) / (right - left)
++        self._values[t] = mean + self._rng.gauss(0.0, sqrt(variance))
++        self._times.insert(index, t)
++        return self._values[t]
++
++    def increments(self, time_grid: Sequence[float]) -> List[float]:
++        values = [self.value(t) for t in time_grid]
++        return [right - left for left, right in zip(values, values[1:])]
++
++
++def stochastic_analytical_solution(
++    x: float,
++    t: float,
++    alpha: float,
++    sigma: float,
++    brownian_value: float,
++    x_start: float = 0.0,
++    x_end: float = 1.0,
++) -> float:
++    """Explicit Itô solution; brownian_value is B_t for the simulated path."""
++    if x == x_start or x == x_end:
++        return 0.0
++    length = x_end - x_start
++    mode = pi * (x - x_start) / length
++    amplitude = exp(
++        (-alpha * (pi / length) ** 2 - 0.5 * sigma ** 2) * t
++        + sigma * brownian_value
++    )
++    return amplitude * sin(mode)
++
++
++def _validate_config(config: StochasticHeatEquationConfig) -> None:
++    if not all(isfinite(value) for value in (
++        config.alpha, config.x_start, config.x_end,
++        config.t_end, config.dt, config.sigma,
++    )):
++        raise ValueError("SPDE parameters must be finite")
++    if config.alpha <= 0 or config.dt <= 0:
++        raise ValueError("alpha and dt must be positive")
++    if config.x_end <= config.x_start or config.t_end < 0:
++        raise ValueError("Invalid domain or terminal time")
++    if isinstance(config.nx, bool) or not isinstance(config.nx, int) or config.nx < 2:
++        raise ValueError("nx must be an integer of at least 2")
++
++
++def solve_stochastic_heat_equation_1d(
++    config: StochasticHeatEquationConfig,
++    *,
++    brownian_path: Optional[BrownianPath] = None,
++    brownian_increments: Optional[Sequence[float]] = None,
++) -> Dict[str, object]:
++    """Solve one path using centered differences and Euler--Maruyama.
++
++    Supply a shared BrownianPath to couple multiple grids, or recorded
++    increments to replay a run. The reported l2 error is a single-path
++    spatial error, not a Monte Carlo estimate of the strong error.
++    """
++    _validate_config(config)
++    if brownian_path is not None and brownian_increments is not None:
++        raise ValueError("Supply either a Brownian path or increments, not both")
++
++    steps = max(1, ceil(config.t_end / config.dt)) if config.t_end else 0
++    time_grid = [min(index * config.dt, config.t_end) for index in range(steps + 1)]
++    time_grid[-1] = config.t_end
++    # A short final interval is used when dt does not divide t_end.
++    time_grid = [t for index, t in enumerate(time_grid) if index == 0 or t > time_grid[index - 1]]
++    if brownian_increments is None:
++        path = brownian_path or BrownianPath(config.t_end, config.seed)
++        if path.t_end != config.t_end:
++            raise ValueError("Brownian path terminal time does not match the task")
++        increments = path.increments(time_grid)
++        brownian_terminal = path.value(config.t_end)
++    else:
++        increments = list(brownian_increments)
++        if len(increments) != len(time_grid) - 1 or not all(isfinite(dw) for dw in increments):
++            raise ValueError("Provide one finite Brownian increment per time interval")
++        brownian_terminal = fsum(increments)
++
++    dx = (config.x_end - config.x_start) / config.nx
++    x_grid = [config.x_start + index * dx for index in range(config.nx + 1)]
++    u = [sin(pi * (x - config.x_start) / (config.x_end - config.x_start)) for x in x_grid]
++    u[0] = u[-1] = 0.0
++
++    for left, right, dw in zip(time_grid, time_grid[1:], increments):
++        ratio = config.alpha * (right - left) / (dx * dx)
++        next_u = u[:]
++        for index in range(1, config.nx):
++            next_u[index] = (
++                u[index]
++                + ratio * (u[index + 1] - 2.0 * u[index] + u[index - 1])
++                + config.sigma * u[index] * dw
++            )
++        next_u[0] = next_u[-1] = 0.0
++        u = next_u
++
++    reference = [stochastic_analytical_solution(
++        x, config.t_end, config.alpha, config.sigma,
++        brownian_terminal, config.x_start, config.x_end,
++    ) for x in x_grid]
++    finite_solution = all(isfinite(value) for value in u)
++    max_dt = stability_limit(config.alpha, dx)
++    return {
++        "config": {**asdict(config), "equation": "stochastic_heat_1d"},
++        "grid": {"dx": dx, "x": x_grid, "time_steps": len(increments)},
++        "stability": {
++            "is_stable": config.dt <= max_dt and finite_solution,
++            "max_stable_dt": max_dt,
++            "cfl": config.alpha * config.dt / (dx * dx),
++            "criterion": "deterministic_diffusion_cfl_and_finite_solution",
++        },
++        "solution": {"numerical_final": u, "reference_final": reference},
++        "errors": {"l2": compute_l2_error(u, reference, dx) if finite_solution else float("inf")},
++        "noise": {
++            "type": "scalar_temporal_multiplicative",
++            "interpretation": "ito",
++            "seed": config.seed,
++            "time_grid": time_grid,
++            "brownian_increments": increments,
++            "brownian_terminal": brownian_terminal,
++        },
++    }
+diff --git a/tasks/loader.py b/tasks/loader.py
+index 963ffaf..1b8e0ab 100644
+--- a/tasks/loader.py
++++ b/tasks/loader.py
+@@ -29,4 +29,9 @@ def load_task(path: str | Path) -> Dict[str, Any]:
+     if missing:
+         raise ValueError(f"Task missing required fields: {', '.join(missing)}")
+ 
++    if data["equation"] not in {"heat_1d", "stochastic_heat_1d"}:
++        raise ValueError(f"Unsupported equation: {data['equation']}")
++    if data["equation"] == "stochastic_heat_1d" and "sigma" not in data:
++        raise ValueError("Stochastic heat task missing required field: sigma")
++
+     return data
+diff --git a/tasks/stochastic_heat_equation_1d.json b/tasks/stochastic_heat_equation_1d.json
+new file mode 100644
+index 0000000..e8628da
+--- /dev/null
++++ b/tasks/stochastic_heat_equation_1d.json
+@@ -0,0 +1,21 @@
++{
++  "equation": "stochastic_heat_1d",
++  "alpha": 1.0,
++  "sigma": 0.5,
++  "domain": {
++    "x_start": 0.0,
++    "x_end": 1.0
++  },
++  "initial_condition": "sin(pi*(x-x_start)/(x_end-x_start))",
++  "boundary_condition": "zero_dirichlet",
++  "t_end": 0.05,
++  "dt": 0.0002,
++  "nx": 40,
++  "error_threshold": 0.01,
++  "budget": {
++    "max_runtime_seconds": 2.0,
++    "max_memory_mb": 32.0
++  },
++  "seed": 12345,
++  "max_retries": 3
++}
+diff --git a/tests/test_stochastic_heat_equation.py b/tests/test_stochastic_heat_equation.py
+new file mode 100644
+index 0000000..8a28802
+--- /dev/null
++++ b/tests/test_stochastic_heat_equation.py
+@@ -0,0 +1,120 @@
++import math
++import random
++import unittest
++from dataclasses import replace
++
++from solver import (
++    BrownianPath,
++    HeatEquationConfig,
++    StochasticHeatEquationConfig,
++    solve_heat_equation_1d,
++    solve_stochastic_heat_equation_1d,
++    stochastic_analytical_solution,
++)
++
++
++class StochasticHeatEquationTests(unittest.TestCase):
++    def setUp(self):
++        self.config = StochasticHeatEquationConfig(
++            alpha=1.0, x_start=0.0, x_end=1.0, nx=40,
++            t_end=0.05, dt=0.0002, sigma=0.5, seed=12345,
++        )
++
++    def test_explicit_solution_contains_ito_correction(self):
++        value = stochastic_analytical_solution(0.5, 0.7, 0.3, 0.8, 0.4)
++        self.assertAlmostEqual(
++            math.log(value), (-0.3 * math.pi ** 2 - 0.8 ** 2 / 2) * 0.7 + 0.8 * 0.4,
++        )
++
++    def test_one_step_euler_maruyama_with_prescribed_increment(self):
++        config = replace(self.config, nx=2, alpha=0.7, sigma=0.3, dt=0.01, t_end=0.01)
++        out = solve_stochastic_heat_equation_1d(config, brownian_increments=[0.12])
++        numerical = 1.0 - 8.0 * 0.7 * 0.01 + 0.3 * 0.12
++        reference = math.exp((-0.7 * math.pi ** 2 - 0.3 ** 2 / 2) * 0.01 + 0.3 * 0.12)
++        self.assertAlmostEqual(out["solution"]["numerical_final"][1], numerical)
++        self.assertAlmostEqual(out["solution"]["reference_final"][1], reference)
++        self.assertAlmostEqual(out["errors"]["l2"], math.sqrt(0.5) * abs(numerical - reference))
++
++    def test_default_solution_is_finite_and_has_zero_boundaries(self):
++        out = solve_stochastic_heat_equation_1d(self.config)
++        self.assertTrue(out["stability"]["is_stable"])
++        self.assertLess(out["errors"]["l2"], 0.01)
++        for key in ["numerical_final", "reference_final"]:
++            self.assertEqual(out["solution"][key][0], 0.0)
++            self.assertEqual(out["solution"][key][-1], 0.0)
++            self.assertTrue(all(math.isfinite(value) for value in out["solution"][key]))
++
++    def test_zero_noise_reduces_to_deterministic_heat_solver(self):
++        out = solve_stochastic_heat_equation_1d(replace(self.config, sigma=0.0))
++        deterministic = solve_heat_equation_1d(HeatEquationConfig(
++            alpha=self.config.alpha, x_start=0.0, x_end=1.0, nx=40,
++            t_end=self.config.t_end, dt=self.config.dt,
++        ))
++        for numerical, expected in zip(
++            out["solution"]["numerical_final"], deterministic["solution"]["numerical_final"],
++        ):
++            self.assertAlmostEqual(numerical, expected, places=12)
++
++    def test_seed_reproducibility_and_recorded_increment_replay(self):
++        out = solve_stochastic_heat_equation_1d(self.config)
++        self.assertEqual(out, solve_stochastic_heat_equation_1d(self.config))
++        replay = solve_stochastic_heat_equation_1d(
++            self.config, brownian_increments=out["noise"]["brownian_increments"],
++        )
++        self.assertEqual(out["solution"]["numerical_final"], replay["solution"]["numerical_final"])
++        self.assertAlmostEqual(out["errors"]["l2"], replay["errors"]["l2"], places=14)
++        changed = solve_stochastic_heat_equation_1d(replace(self.config, seed=54321))
++        self.assertNotEqual(out["noise"]["brownian_terminal"], changed["noise"]["brownian_terminal"])
++        self.assertNotEqual(out["solution"]["numerical_final"], changed["solution"]["numerical_final"])
++
++    def test_partial_final_time_step_and_shifted_domain(self):
++        config = replace(self.config, x_start=2.0, x_end=4.0, nx=4, dt=0.002, t_end=0.005)
++        out = solve_stochastic_heat_equation_1d(config, brownian_increments=[0.01, -0.02, 0.03])
++        self.assertEqual(out["noise"]["time_grid"], [0.0, 0.002, 0.004, 0.005])
++        self.assertAlmostEqual(out["noise"]["brownian_terminal"], 0.02)
++        self.assertAlmostEqual(out["solution"]["reference_final"][2], math.exp(
++            (-math.pi ** 2 / 4 - 0.5 ** 2 / 2) * 0.005 + 0.5 * 0.02,
++        ))
++
++    def test_shared_path_couples_coarse_and_fine_increments(self):
++        path = BrownianPath(1.0, 91)
++        coarse = path.increments([0.0, 0.5, 1.0])
++        midpoint = path.value(0.5)
++        fine = path.increments([0.0, 0.25, 0.5, 0.75, 1.0])
++        self.assertEqual(path.value(0.5), midpoint)
++        self.assertAlmostEqual(sum(fine[:2]), coarse[0])
++        self.assertAlmostEqual(sum(fine[2:]), coarse[1])
++        self.assertAlmostEqual(sum(fine), path.value(1.0))
++
++    def test_brownian_bridge_variance_and_covariance(self):
++        seeds = random.Random(71)
++        pairs = []
++        for _ in range(4096):
++            path = BrownianPath(1.0, seeds.getrandbits(64))
++            pairs.append((path.value(0.5), path.value(1.0)))
++        mean_half = sum(a for a, _ in pairs) / len(pairs)
++        mean_full = sum(b for _, b in pairs) / len(pairs)
++        variance_half = sum((a - mean_half) ** 2 for a, _ in pairs) / len(pairs)
++        variance_full = sum((b - mean_full) ** 2 for _, b in pairs) / len(pairs)
++        covariance = sum((a - mean_half) * (b - mean_full) for a, b in pairs) / len(pairs)
++        self.assertLess(abs(mean_half), 0.05)
++        self.assertLess(abs(mean_full), 0.05)
++        self.assertAlmostEqual(variance_half, 0.5, delta=0.05)
++        self.assertAlmostEqual(variance_full, 1.0, delta=0.08)
++        self.assertAlmostEqual(covariance, 0.5, delta=0.06)
++
++    def test_invalid_config_and_increment_length_are_rejected(self):
++        for config in [replace(self.config, dt=0.0), replace(self.config, nx=1), replace(self.config, sigma=float("nan"))]:
++            with self.assertRaises(ValueError):
++                solve_stochastic_heat_equation_1d(config)
++        with self.assertRaises(ValueError):
++            solve_stochastic_heat_equation_1d(self.config, brownian_increments=[0.1])
++
++    def test_zero_terminal_time(self):
++        out = solve_stochastic_heat_equation_1d(replace(self.config, t_end=0.0))
++        self.assertEqual(out["grid"]["time_steps"], 0)
++        self.assertEqual(out["errors"]["l2"], 0.0)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_stochastic_run_agent.py b/tests/test_stochastic_run_agent.py
+new file mode 100644
+index 0000000..c30c014
+--- /dev/null
++++ b/tests/test_stochastic_run_agent.py
+@@ -0,0 +1,73 @@
++import csv
++import json
++import tempfile
++import unittest
++from pathlib import Path
++from unittest.mock import patch
++
++import run_agent
++from solver import StochasticHeatEquationConfig, solve_stochastic_heat_equation_1d
++from tasks import load_task
++
++
++class StochasticRunAgentTests(unittest.TestCase):
++    def setUp(self):
++        self.temp_dir = tempfile.TemporaryDirectory()
++        self.addCleanup(self.temp_dir.cleanup)
++        self.root = Path(self.temp_dir.name)
++        self.task = json.loads((run_agent.ROOT / "tasks" / "stochastic_heat_equation_1d.json").read_text())
++
++    def _run(self):
++        task_path = self.root / "task.json"
++        task_path.write_text(json.dumps(self.task), encoding="utf-8")
++        with patch("run_agent.ROOT", self.root), patch("run_agent._plot_solution"):
++            return run_agent.run(task_path)
++
++    def test_spde_dispatch_raw_solution_and_noise_replay(self):
++        outcome = self._run()
++        self.assertTrue(outcome["evaluation"]["pass"])
++        self.assertEqual(outcome["evaluation"]["metrics"]["error_type"], "single_path_l2")
++        self.assertIsNone(outcome["evaluation"]["metrics"]["estimated_convergence_order"])
++        outputs = outcome["outputs"]
++        with (self.root / outputs["brownian_path"]).open(newline="") as file:
++            path_rows = list(csv.DictReader(file))
++        with (self.root / outputs["solution"]).open(newline="") as file:
++            solution_rows = list(csv.DictReader(file))
++        increments = [float(row["increment"]) for row in path_rows[1:]]
++        self.assertEqual(float(path_rows[-1]["t"]), self.task["t_end"])
++        config = StochasticHeatEquationConfig(
++            alpha=self.task["alpha"], x_start=0.0, x_end=1.0, nx=self.task["nx"],
++            t_end=self.task["t_end"], dt=self.task["dt"], sigma=self.task["sigma"], seed=self.task["seed"],
++        )
++        replay = solve_stochastic_heat_equation_1d(config, brownian_increments=increments)
++        self.assertEqual([float(row["numerical"]) for row in solution_rows], replay["solution"]["numerical_final"])
++        self.assertAlmostEqual(outcome["evaluation"]["metrics"]["l2_error"], replay["errors"]["l2"], places=14)
++        self.assertTrue((self.root / outputs["report"]).is_file())
++
++    def test_parameter_retries_keep_the_same_brownian_path(self):
++        self.task.update(error_threshold=0.0, max_retries=1)
++        outcome = self._run()
++        self.assertFalse(outcome["evaluation"]["pass"])
++        self.assertEqual(len(outcome["attempts"]), 2)
++        first, second = outcome["attempts"]
++        self.assertNotEqual(first["dt"], second["dt"])
++        self.assertEqual(first["brownian_terminal"], second["brownian_terminal"])
++        self.assertTrue((self.root / outcome["outputs"]["brownian_path"]).is_file())
++
++    def test_spde_sigma_is_required(self):
++        del self.task["sigma"]
++        task_path = self.root / "task.json"
++        task_path.write_text(json.dumps(self.task))
++        with self.assertRaisesRegex(ValueError, "sigma"):
++            load_task(task_path)
++
++    def test_unknown_equation_is_rejected(self):
++        self.task["equation"] = "unknown_spde"
++        task_path = self.root / "task.json"
++        task_path.write_text(json.dumps(self.task))
++        with self.assertRaisesRegex(ValueError, "Unsupported equation"):
++            load_task(task_path)
++
++
++if __name__ == "__main__":
++    unittest.main()
