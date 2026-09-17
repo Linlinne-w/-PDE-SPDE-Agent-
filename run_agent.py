@@ -203,7 +203,7 @@ def run(task_path: Path) -> Dict[str, object]:
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     _write_outputs(run_id, task, evaluation, attempts)
-        _plot_solution(
+    _plot_solution(
         solved, ROOT / "runs" / run_id / "artifacts" / "solution_comparison.png"
     )
     return {"run_id": run_id, "evaluation": evaluation, "attempts": attempts}
