@@ -22,11 +22,7 @@ class StochasticHeatEquationConfig:
 
 
 class BrownianPath:
-    """Sample a Brownian path at requested times using conditional bridges.
-
-    Previously sampled values are retained so retries on different time grids
-    remain coupled to the same Brownian path.
-    """
+    """Sample a Brownian path at requested times using conditional bridges."""
 
     def __init__(self, t_end: float, seed: int):
         if not isfinite(t_end) or t_end < 0:
@@ -80,8 +76,12 @@ def stochastic_analytical_solution(
 
 def _validate_config(config: StochasticHeatEquationConfig) -> None:
     if not all(isfinite(value) for value in (
-        config.alpha, config.x_start, config.x_end,
-        config.t_end, config.dt, config.sigma,
+        config.alpha,
+        config.x_start,
+        config.x_end,
+        config.t_end,
+        config.dt,
+        config.sigma,
     )):
         raise ValueError("SPDE parameters must be finite")
     if config.alpha <= 0 or config.dt <= 0:
@@ -141,8 +141,13 @@ def solve_stochastic_heat_equation_1d(
         u = next_u
 
     reference = [stochastic_analytical_solution(
-        x, config.t_end, config.alpha, config.sigma,
-        brownian_terminal, config.x_start, config.x_end,
+        x,
+        config.t_end,
+        config.alpha,
+        config.sigma,
+        brownian_terminal,
+        config.x_start,
+        config.x_end,
     ) for x in x_grid]
     finite_solution = all(isfinite(value) for value in u)
     max_dt = stability_limit(config.alpha, dx)
@@ -156,7 +161,10 @@ def solve_stochastic_heat_equation_1d(
             "criterion": "deterministic_diffusion_cfl_and_finite_solution",
         },
         "solution": {"numerical_final": u, "reference_final": reference},
-        "errors": {"l2": compute_l2_error(u, reference, dx) if finite_solution else float("inf")},
+        "errors": {
+            "l2": compute_l2_error(u, reference, dx)
+            if finite_solution else float("inf")
+        },
         "noise": {
             "type": "scalar_temporal_multiplicative",
             "interpretation": "ito",

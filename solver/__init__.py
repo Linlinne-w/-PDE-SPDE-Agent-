@@ -13,8 +13,13 @@ from .stochastic_heat_equation import (
 )
 
 __all__ = [
-    "HeatEquationConfig", "analytical_solution", "compute_l2_error",
-    "solve_heat_equation_1d", "stability_limit", "BrownianPath",
-    "StochasticHeatEquationConfig", "solve_stochastic_heat_equation_1d",
+    "HeatEquationConfig",
+    "analytical_solution",
+    "compute_l2_error",
+    "solve_heat_equation_1d",
+    "stability_limit",
+    "BrownianPath",
+    "StochasticHeatEquationConfig",
+    "solve_stochastic_heat_equation_1d",
     "stochastic_analytical_solution",
 ]
