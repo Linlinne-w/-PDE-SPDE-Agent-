@@ -17,7 +17,47 @@ from tasks import load_task
 
 
 ROOT = Path(__file__).resolve().parent
+def _plot_solution(solved: Dict[str, object], output_path: Path) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
 
+    # 获取本次求解的网格、数值解和解析解
+    x = solved["grid"]["x"]
+    u_num = solved["solution"]["numerical_final"]
+    u_ref = solved["solution"]["reference_final"]
+    error = [abs(a - b) for a, b in zip(u_num, u_ref)]
+    cfg = solved["config"]
+
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(8, 6), sharex=True, layout="constrained"
+    )
+    try:
+        # 上图：数值解与解析解对比
+        ax1.plot(x, u_ref, "k-", label="Analytical solution")
+        ax1.plot(
+            x, u_num, "ro", markersize=4, fillstyle="none",
+            label="Numerical solution"
+        )
+        ax1.set_ylabel("u(x, t)")
+        ax1.set_title(
+            f"t = {cfg['t_end']:g}, nx = {cfg['nx']}, dt = {cfg['dt']:g}\n"
+            f"L2 error = {solved['errors']['l2']:.3e}"
+        )
+        ax1.legend()
+        ax1.grid(alpha=0.3)
+
+        # 下图：各空间位置的绝对误差
+        ax2.plot(x, error, color="tab:blue")
+        ax2.set_xlabel("x")
+        ax2.set_ylabel("Absolute error")
+        ax2.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
+        ax2.grid(alpha=0.3)
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=200)
+    finally:
+        plt.close(fig)
 
 def _measure_solve(config: HeatEquationConfig) -> Dict[str, object]:
     tracemalloc.start()
